@@ -1,0 +1,68 @@
+"""
+Sample study document: Operating Systems
+"""
+
+Operating Systems — Core Concepts
+
+1. PROCESS MANAGEMENT
+======================
+A process is a program in execution. It has states: New, Ready, Running, Waiting, Terminated.
+
+Process Control Block (PCB):
+- Process ID (PID)
+- CPU registers
+- Program counter
+- Memory limits
+- Open files list
+
+Process Scheduling Algorithms:
+- FCFS (First Come First Served): Non-preemptive, simple, convoy effect possible.
+- SJF (Shortest Job First): Optimal average waiting time, needs burst time prediction.
+- Round Robin: Preemptive, fair, uses time quantum.
+- Priority Scheduling: Higher priority runs first; starvation possible (solved by aging).
+
+Formula — Average Waiting Time:
+  AWT = Sum of Waiting Times / Number of Processes
+
+2. MEMORY MANAGEMENT
+=====================
+Virtual Memory: Allows programs to use more memory than physically available.
+Paging: Fixed-size blocks (pages). No external fragmentation.
+Segmentation: Variable-size segments. No internal fragmentation.
+
+Page Fault: When a required page is not in memory. Handled by OS via page replacement.
+
+Page Replacement Algorithms:
+- FIFO: Replace oldest page. Belady's anomaly possible.
+- LRU (Least Recently Used): Replace least recently used. No Belady's anomaly.
+- Optimal: Replace page used farthest in future. Theoretical best.
+
+Formula — Hit Ratio:
+  Hit Ratio = Number of Hits / (Hits + Misses)
+
+3. DEADLOCK
+============
+Four Conditions for Deadlock (Coffman Conditions):
+1. Mutual Exclusion
+2. Hold and Wait
+3. No Preemption
+4. Circular Wait
+
+Deadlock Prevention: Eliminate any one condition.
+Deadlock Avoidance: Banker's Algorithm.
+Deadlock Detection: Wait-for graph.
+Deadlock Recovery: Kill process or resource preemption.
+
+4. FILE SYSTEM
+===============
+File Allocation Methods:
+- Contiguous: Fast access, external fragmentation.
+- Linked: No external fragmentation, slow random access.
+- Indexed: Supports random access, index block overhead.
+
+Disk Scheduling Algorithms:
+- FCFS, SSTF (Shortest Seek Time First), SCAN, C-SCAN
+
+Important formulas:
+  Disk Access Time = Seek Time + Rotational Latency + Transfer Time
+  Throughput = Data Transferred / Time

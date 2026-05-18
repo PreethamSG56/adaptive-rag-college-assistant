@@ -1,0 +1,69 @@
+"""
+Sample study document: DBMS
+"""
+
+Database Management Systems — Core Concepts
+
+1. RELATIONAL MODEL
+====================
+Table (Relation): Collection of rows (tuples) and columns (attributes).
+Primary Key: Uniquely identifies each record.
+Foreign Key: Links two tables together.
+Candidate Key: Minimal set of attributes that uniquely identifies a tuple.
+
+2. NORMALIZATION
+=================
+Normalization: Process of organizing data to reduce redundancy and improve integrity.
+
+First Normal Form (1NF):
+- All attributes are atomic (no multi-valued attributes).
+- Each row is unique.
+
+Second Normal Form (2NF):
+- Must be in 1NF.
+- No partial dependency (non-key attributes fully depend on the primary key).
+
+Third Normal Form (3NF):
+- Must be in 2NF.
+- No transitive dependency (non-key attributes don't depend on other non-key attributes).
+
+Boyce-Codd Normal Form (BCNF):
+- Stronger version of 3NF.
+- For every X -> Y, X must be a superkey.
+
+3. SQL COMMANDS
+================
+DDL (Data Definition Language): CREATE, ALTER, DROP, TRUNCATE
+DML (Data Manipulation Language): SELECT, INSERT, UPDATE, DELETE
+DCL (Data Control Language): GRANT, REVOKE
+TCL (Transaction Control Language): COMMIT, ROLLBACK, SAVEPOINT
+
+Important SQL Query:
+  SELECT column FROM table WHERE condition GROUP BY col HAVING condition ORDER BY col;
+
+4. TRANSACTIONS AND ACID PROPERTIES
+=====================================
+Atomicity: Transaction is all or nothing.
+Consistency: Database remains consistent before and after transaction.
+Isolation: Transactions don't interfere with each other.
+Durability: Committed transactions persist even after failure.
+
+Transaction States: Active -> Partially Committed -> Committed / Failed -> Aborted
+
+5. INDEXING
+============
+B-Tree Index: Balanced tree structure, supports range queries.
+Hash Index: Exact match queries, not range.
+Dense Index: Entry for every record.
+Sparse Index: Entry for every block.
+
+Formula — Blocking Factor:
+  Blocking Factor = Block Size / Record Size
+
+6. ER MODEL
+============
+Entity: Real-world object.
+Attribute: Property of entity.
+Relationship: Association between entities.
+Cardinality: 1:1, 1:N, M:N
+Participation: Total (mandatory) or Partial (optional).

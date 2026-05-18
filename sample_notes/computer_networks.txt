@@ -1,0 +1,72 @@
+"""
+Sample study document: Computer Networks
+"""
+
+Computer Networks — Core Concepts
+
+1. OSI MODEL (7 Layers)
+========================
+Layer 7 - Application:  HTTP, FTP, SMTP, DNS, Telnet
+Layer 6 - Presentation: Encryption, compression, translation
+Layer 5 - Session:      Session establishment, synchronization
+Layer 4 - Transport:    TCP, UDP — end-to-end delivery
+Layer 3 - Network:      IP, ICMP, routing
+Layer 2 - Data Link:    MAC, framing, error detection (Ethernet)
+Layer 1 - Physical:     Bits, cables, NIC
+
+Mnemonic: "All People Seem To Need Data Processing"
+
+2. TCP/IP PROTOCOL SUITE
+==========================
+TCP (Transmission Control Protocol):
+- Connection-oriented (3-way handshake: SYN, SYN-ACK, ACK)
+- Reliable, in-order delivery
+- Flow control (sliding window), congestion control
+- Used for HTTP, FTP, email
+
+UDP (User Datagram Protocol):
+- Connectionless, no guarantee of delivery
+- Faster, lower overhead
+- Used for DNS, streaming, VoIP, gaming
+
+IP Addressing:
+- IPv4: 32-bit, dotted decimal (e.g., 192.168.1.1)
+- IPv6: 128-bit, hexadecimal (e.g., 2001:0db8::1)
+- Subnet Mask: Identifies network and host portions
+- CIDR Notation: 192.168.1.0/24
+
+3. ROUTING ALGORITHMS
+======================
+Distance Vector (RIP): Each router shares its routing table with neighbors. Slow convergence.
+Link State (OSPF): Each router knows full topology. Dijkstra's algorithm. Fast convergence.
+BGP: Inter-domain routing protocol for the internet.
+
+Formula — Bandwidth-Delay Product:
+  BDP = Bandwidth x Round-Trip Time
+
+4. ERROR DETECTION AND CORRECTION
+===================================
+Parity Bit: Single bit for error detection.
+CRC (Cyclic Redundancy Check): Polynomial division, strong error detection.
+Hamming Code: Error correction. Can correct 1-bit errors.
+
+Formula — Minimum Hamming Distance for error correction:
+  d_min = 2t + 1 (where t = number of bit errors to correct)
+
+5. FLOW AND CONGESTION CONTROL
+================================
+Stop-and-Wait: Send one frame, wait for ACK. Low efficiency.
+Sliding Window: Multiple frames in transit. Higher efficiency.
+
+Efficiency (Stop and Wait):
+  eta = 1 / (1 + 2a), where a = propagation delay / transmission delay
+
+6. APPLICATION LAYER PROTOCOLS
+================================
+HTTP: Port 80, stateless, request-response model (GET, POST, PUT, DELETE)
+HTTPS: Port 443, HTTP over TLS/SSL
+DNS: Port 53, translates domain names to IP addresses
+FTP: Port 21 (control), Port 20 (data), file transfer
+SMTP: Port 25, email sending
+POP3: Port 110, email retrieval
+DHCP: Dynamically assigns IP addresses

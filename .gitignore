@@ -1,0 +1,7 @@
+.env
+__pycache__/
+*.pyc
+embeddings/
+feedback_log.jsonl
+*.pkl
+*.index
