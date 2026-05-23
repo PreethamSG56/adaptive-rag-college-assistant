@@ -42,16 +42,30 @@ class VectorStore:
         model = self._get_model()
         texts = [doc.text for doc in documents]
         print(f"[VectorStore] Encoding {len(texts)} chunks using FastEmbed...")
-        
+
         # fastembed returns a generator of numpy arrays
-        embeddings_gen = model.embed(texts, batch_size=32)
+        embeddings_gen = model.embed(texts, batch_size=64)   # increased batch size
         embeddings = np.array(list(embeddings_gen)).astype(np.float32)
-        
+
         dim = embeddings.shape[1]
-        if self._index is None:
-            self._index = faiss.IndexFlatIP(dim)
-            
         faiss.normalize_L2(embeddings)
+
+        if self._index is None:
+            # Use IVFFlat for large collections (much faster retrieval)
+            # Use FlatIP for small ones (exact, no training overhead)
+            total = len(documents)
+            if total >= 500:
+                n_clusters = min(int(total ** 0.5), 256)
+                quantizer  = faiss.IndexFlatIP(dim)
+                self._index = faiss.IndexIVFFlat(quantizer, dim, n_clusters,
+                                                  faiss.METRIC_INNER_PRODUCT)
+                self._index.train(embeddings)
+                self._index.nprobe = max(8, n_clusters // 8)  # search 12% of clusters
+                print(f"[VectorStore] Using IVFFlat index (n_clusters={n_clusters})")
+            else:
+                self._index = faiss.IndexFlatIP(dim)
+                print("[VectorStore] Using FlatIP index")
+
         self._index.add(embeddings)
         self._documents.extend(documents)
         print(f"[VectorStore] Total indexed: {len(self._documents)}")

@@ -4,6 +4,12 @@ Document Loader and Chunker
 Supports: PDF, DOCX, PPTX, TXT, PNG, JPG files.
 Chunks text with configurable size and overlap.
 
+Speed optimisations:
+  - EasyOCR reader is a module-level singleton (loads once per process)
+  - OpenCV image preprocessing before OCR (grayscale → denoise → threshold)
+  - PDF pages are OCR'd in parallel via ThreadPoolExecutor
+  - NLP post-processing skipped for high-quality digital text
+
 NLP Pipeline (for handwritten / scanned notes):
   OCR (EasyOCR)  →  Noise removal  →  Spell-correction (SymSpell)
   →  Sentence segmentation (spaCy)  →  Keyword extraction
@@ -14,34 +20,121 @@ from __future__ import annotations
 
 import os
 import re
-import base64
+import warnings
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import List, Optional
 
+# ── EasyOCR singleton — load the model ONCE for the entire process ──────────
+_easyocr_reader = None
+
+def _get_ocr_reader():
+    """Lazy-load EasyOCR reader once and cache it globally."""
+    global _easyocr_reader
+    if _easyocr_reader is not None:
+        return _easyocr_reader
+    try:
+        import easyocr
+        print("[OCR] Loading EasyOCR model (one-time, subsequent calls are instant)...")
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            _easyocr_reader = easyocr.Reader(
+                ['en'],
+                gpu=False,
+                verbose=False,
+                model_storage_directory=None,  # use default cache
+            )
+        print("[OCR] EasyOCR model loaded and cached.")
+    except Exception as e:
+        print(f"[OCR] Failed to load EasyOCR: {e}")
+        _easyocr_reader = None
+    return _easyocr_reader
+
+
+# ── OpenCV image preprocessing — makes OCR faster AND more accurate ─────────
+def _preprocess_image(image_bytes: bytes) -> bytes:
+    """
+    Preprocess image before OCR:
+      1. Decode bytes → numpy array
+      2. Convert to grayscale (removes colour noise)
+      3. Resize to 2x if small (EasyOCR accuracy improves at higher resolution)
+      4. Apply fast non-local means denoise
+      5. Adaptive threshold → clean black-on-white binary image
+      6. Re-encode as PNG bytes
+
+    Returns preprocessed PNG bytes, or original bytes if OpenCV unavailable.
+    """
+    try:
+        import cv2
+        import numpy as np
+
+        # Decode
+        arr = np.frombuffer(image_bytes, dtype=np.uint8)
+        img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+        if img is None:
+            return image_bytes
+
+        # Grayscale
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+
+        # Upscale if the image is small (improves OCR speed by reducing failed reads)
+        h, w = gray.shape
+        if max(h, w) < 1000:
+            scale = 2.0
+            gray = cv2.resize(gray, (int(w * scale), int(h * scale)),
+                              interpolation=cv2.INTER_CUBIC)
+
+        # Fast denoise (h=10 for handwritten, 5 for printed)
+        gray = cv2.fastNlMeansDenoising(gray, h=10, templateWindowSize=7, searchWindowSize=21)
+
+        # Adaptive threshold — turns handwriting into clean black-on-white
+        binary = cv2.adaptiveThreshold(
+            gray, 255,
+            cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+            cv2.THRESH_BINARY,
+            blockSize=31,
+            C=10,
+        )
+
+        # Re-encode
+        _, buf = cv2.imencode('.png', binary)
+        return buf.tobytes()
+    except Exception as e:
+        print(f"[OCR] OpenCV preprocessing skipped: {e}")
+        return image_bytes
+
 
 def _transcribe_image_local(image_bytes: bytes, run_nlp: bool = True) -> tuple:
     """
-    Uses offline EasyOCR (CNN/RNN) to read handwritten or scanned text,
-    then applies NLP post-processing to clean and enrich the result.
+    Fast OCR pipeline:
+      1. OpenCV preprocessing (grayscale, denoise, threshold)
+      2. EasyOCR via cached singleton reader (no model reload!)
+      3. NLP post-processing (only for low-confidence / handwritten pages)
 
     Returns
     -------
     tuple (cleaned_text: str, ocr_confidence: float, keywords: list[str])
     """
+    # Step 1 — preprocess image for faster, cleaner OCR
+    processed_bytes = _preprocess_image(image_bytes)
+
+    # Step 2 — OCR with cached reader (loads only once per process)
+    reader = _get_ocr_reader()
+    if reader is None:
+        return "", 0.0, []
+
     raw_text = ""
     try:
-        import easyocr
-        import warnings
-        # Suppress FutureWarnings from torch/easyocr
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore")
-            reader = easyocr.Reader(['en'], gpu=False, verbose=False)
-
-        print("[OCR] Running EasyOCR on image... this might take a moment.")
-        results = reader.readtext(image_bytes, detail=0)
+        print("[OCR] Scanning image...")
+        results = reader.readtext(
+            processed_bytes,
+            detail=0,
+            paragraph=True,     # group lines → fewer calls, faster
+            batch_size=8,       # process 8 text regions at once
+        )
         raw_text = " ".join(results).strip()
-        print(f"[OCR] Raw text extracted: {len(raw_text)} chars")
+        print(f"[OCR] Extracted {len(raw_text)} chars")
     except Exception as e:
         print(f"[OCR] EasyOCR error: {e}")
         return "", 0.0, []
@@ -49,21 +142,23 @@ def _transcribe_image_local(image_bytes: bytes, run_nlp: bool = True) -> tuple:
     if not raw_text:
         return "", 0.0, []
 
-    # ── NLP post-processing ──
+    # Step 3 — NLP post-processing
     if run_nlp:
         try:
-            from src.nlp_processor import process_ocr_text
+            from src.nlp_processor import process_ocr_text, _ocr_quality_score
+            # Quick confidence check — skip heavy NLP for clean text
+            quick_conf = _ocr_quality_score(raw_text)
+            run_spell = quick_conf < 0.85   # only spell-correct if text looks noisy
             nlp_result = process_ocr_text(
                 raw_text,
-                run_spell_correction=True,
+                run_spell_correction=run_spell,
                 run_spacy=True,
                 is_handwritten=True,
             )
             print(
-                f"[NLP] OCR confidence: {nlp_result.ocr_confidence:.2f} | "
-                f"spell_corrected={nlp_result.spell_corrected} | "
-                f"spacy={nlp_result.spacy_enriched} | "
-                f"keywords={len(nlp_result.keywords)}"
+                f"[NLP] conf={nlp_result.ocr_confidence:.2f} "
+                f"spell={nlp_result.spell_corrected} "
+                f"kw={len(nlp_result.keywords)}"
             )
             return nlp_result.cleaned_text, nlp_result.ocr_confidence, nlp_result.keywords
         except Exception as e:
@@ -87,10 +182,18 @@ def _load_txt(path: Path) -> str:
         return f.read()
 
 
+def _ocr_page(args: tuple) -> tuple:
+    """Worker function for parallel PDF page OCR. Returns (page_index, text, conf, keywords)."""
+    i, img_bytes = args
+    ocr_text, conf, kws = _transcribe_image_local(img_bytes)
+    return i, ocr_text, conf, kws
+
+
 def _load_pdf(path: Path) -> tuple:
     """
     Extract text from PDF using PyMuPDF.
-    Scanned/handwritten pages are automatically OCR'd via EasyOCR + NLP pipeline.
+    - Digital text pages: extracted instantly (no OCR).
+    - Scanned/handwritten pages: OCR'd in PARALLEL threads for maximum speed.
 
     Returns
     -------
@@ -103,33 +206,53 @@ def _load_pdf(path: Path) -> tuple:
     try:
         import fitz
         doc = fitz.open(path)
-        pages = []
+        total_pages = len(doc)
+
+        # ── Pass 1: extract digital text & identify scanned pages ──────────
+        page_texts   = [""] * total_pages
+        page_confs   = [1.0] * total_pages
+        page_kws     = [[] for _ in range(total_pages)]
+        ocr_jobs     = []   # (page_index, img_bytes) for scanned pages
+
         for i, page in enumerate(doc):
             text = page.get_text("text").strip()
-            page_ocr_conf = 1.0
-            page_keywords: list = []
+            if len(text) >= 150:
+                # Digital text — fast, no OCR needed
+                page_texts[i] = text
+            else:
+                # Scanned/handwritten — render at 2x zoom and queue for OCR
+                print(f"[Loader] Page {i+1}/{total_pages} → queued for OCR")
+                pix = page.get_pixmap(matrix=fitz.Matrix(2, 2))
+                ocr_jobs.append((i, pix.tobytes("png")))
 
-            # If the page has little extractable text, it's likely scanned/handwritten
-            if len(text) < 150:
-                print(f"[Loader] Page {i+1} appears to be scanned/handwritten. Running OCR + NLP...")
-                pix = page.get_pixmap(matrix=fitz.Matrix(2, 2))  # 2x zoom for better OCR
-                img_bytes = pix.tobytes("png")
-                ocr_text, conf, kws = _transcribe_image_local(img_bytes)
-                if ocr_text:
-                    text = ocr_text
-                    page_ocr_conf = conf
-                    page_keywords = kws
+        # ── Pass 2: parallel OCR for scanned pages ─────────────────────────
+        if ocr_jobs:
+            max_workers = min(4, len(ocr_jobs))   # cap at 4 threads (CPU-bound)
+            print(f"[Loader] Running OCR on {len(ocr_jobs)} page(s) with {max_workers} thread(s)...")
+            with ThreadPoolExecutor(max_workers=max_workers) as pool:
+                futures = {pool.submit(_ocr_page, job): job[0] for job in ocr_jobs}
+                for future in as_completed(futures):
+                    pg_i, ocr_text, conf, kws = future.result()
+                    if ocr_text:
+                        page_texts[pg_i] = ocr_text
+                        page_confs[pg_i] = conf
+                        page_kws[pg_i]   = kws
+                        print(f"[Loader] Page {pg_i+1} OCR done — conf={conf:.2f} {len(ocr_text)}chars")
 
-            if text:
-                pages.append(text)
+        # ── Assemble results ───────────────────────────────────────────────
+        pages = []
+        for i in range(total_pages):
+            if page_texts[i]:
+                pages.append(page_texts[i])
                 page_meta.append({
                     "page": i + 1,
-                    "ocr_confidence": page_ocr_conf,
-                    "keywords": page_keywords,
+                    "ocr_confidence": page_confs[i],
+                    "keywords": page_kws[i],
                 })
 
         full_text = "\n\n".join(pages)
-        print(f"[Loader] PDF loaded via PyMuPDF: {len(full_text)} chars from {len(pages)} pages")
+        print(f"[Loader] PDF done: {len(full_text)} chars, {len(pages)} pages "
+              f"({len(ocr_jobs)} OCR'd in parallel)")
         return full_text, page_meta
     except Exception as e:
         print(f"[Loader] PyMuPDF error {path.name}: {e}")
