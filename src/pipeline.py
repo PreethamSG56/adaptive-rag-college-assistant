@@ -31,6 +31,7 @@ from src.adaptive_selector import AdaptiveSelector
 from src.generator import generate_answer
 from src.feedback import FeedbackTracker, QueryMetrics
 from src.cache import QueryCache
+from src.hallucination_guard import guard_answer, format_guard_metadata
 
 
 class AdaptiveRAGPipeline:
@@ -121,13 +122,23 @@ class AdaptiveRAGPipeline:
 
         # 4. Generation
         t_gen_start = time.perf_counter()
-        answer = generate_answer(
+        raw_answer = generate_answer(
             query_text,
             context_docs,
             mode=mode,
             model_size="large" if profile.complexity_label == "complex" else "small",
         )
         generation_time = time.perf_counter() - t_gen_start
+
+        # 4b. Hallucination Guard — verify answer against context
+        guard_result = guard_answer(
+            raw_answer,
+            context_docs,
+            grounding_threshold=0.12,
+            pass_ratio=0.50,
+            partial_ratio=0.25,
+        )
+        answer = guard_result.grounded_answer
 
         total_time = time.perf_counter() - t0
 
@@ -168,6 +179,15 @@ class AdaptiveRAGPipeline:
                 "retrieval_s": round(retrieval_time, 4),
                 "generation_s": round(generation_time, 4),
                 "total_s": round(total_time, 4),
+            },
+            # Hallucination guard metadata
+            "grounding": {
+                "verdict": guard_result.verdict,
+                "confidence": guard_result.overall_confidence,
+                "grounded_ratio": guard_result.grounded_sentence_ratio,
+                "ocr_warning": guard_result.ocr_quality_warning,
+                "ungrounded_count": len(guard_result.ungrounded_sentences),
+                "summary": format_guard_metadata(guard_result),
             },
             "from_cache": False,
         }

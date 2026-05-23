@@ -5,3 +5,12 @@ embeddings/
 feedback_log.jsonl
 *.pkl
 *.index
+
+# Virtual environment
+venv/
+.venv/
+env/
+
+# OS artifacts
+.DS_Store
+Thumbs.db

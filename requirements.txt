@@ -16,3 +16,11 @@ python-pptx>=0.6.23
 openai>=1.30.0
 python-dotenv>=1.0.0
 requests>=2.31.0
+
+# ── NLP & Handwritten Notes Pipeline ──────────────────────────────────────
+easyocr>=1.7.1                  # Handwritten/scanned image OCR (offline CNN/LSTM)
+symspellpy>=6.7.7               # Ultra-fast offline spell correction (SymSpell algorithm)
+spacy>=3.7.0                    # NLP: sentence segmentation + named entity recognition
+# Run after install: python -m spacy download en_core_web_sm
+opencv-python-headless>=4.9.0   # Image preprocessing for better OCR accuracy
+Pillow>=10.0.0                  # Image loading / format conversion

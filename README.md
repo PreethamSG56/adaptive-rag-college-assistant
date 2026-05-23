@@ -1,6 +1,19 @@
 # College Notes Adaptive RAG Assistant
 
-> An intelligent AI-powered assistant that helps students interact with their college notes using **Retrieval-Augmented Generation (RAG)** with adaptive inference optimization.
+> An intelligent AI-powered assistant that helps students interact with their college notes using **Retrieval-Augmented Generation (RAG)** with adaptive inference, **handwritten note OCR + NLP**, and a **hallucination guard** to ensure answer accuracy.
+
+---
+
+## ✨ What's New — NLP + Handwritten Notes Integration
+
+| Feature | Description |
+|---|---|
+| ✍️ **Handwritten Notes OCR** | Upload photos/scans of handwritten notes (PNG, JPG) — EasyOCR reads them offline |
+| 🧹 **NLP Post-Processing** | Noise removal → Spell-correction (SymSpell) → Sentence segmentation (spaCy) |
+| 📊 **OCR Confidence Scoring** | Every page gets a quality score; low-confidence sources are flagged in the UI |
+| 🔑 **Keyword Enrichment** | spaCy extracts named entities & noun chunks → appended to chunks for better BM25 retrieval |
+| 🛡️ **Hallucination Guard** | Every LLM answer is verified sentence-by-sentence against retrieved context (token F1) |
+| 🚦 **Grounding Verdicts** | Each answer shows `✅ PASS / ⚠️ PARTIAL / 🚫 FAIL` with confidence % in the UI |
 
 ---
 
@@ -8,7 +21,7 @@
 
 | Feature | Description |
 |---|---|
-| **Document Upload** | PDF, DOCX, PPTX, TXT support |
+| **Document Upload** | PDF, DOCX, PPTX, TXT, PNG, JPG (handwritten) |
 | **Hybrid Retrieval** | FAISS semantic search + BM25 keyword search |
 | **Adaptive Top-K** | Dynamic retrieval depth based on query complexity |
 | **Re-ranking** | Relevance re-ranking of retrieved chunks |
@@ -21,43 +34,97 @@
 
 ## Quick Start
 
-### 1. Install dependencies
+### 1. Create & activate a virtual environment
 ```powershell
 cd "g:\indicnode assaignment\college-notes-rag"
+
+# Create venv
+python -m venv venv
+
+# Activate (Windows PowerShell)
+.\venv\Scripts\Activate.ps1
+
+# Activate (Windows CMD)
+.\venv\Scripts\activate.bat
+```
+
+### 2. Install all dependencies
+```powershell
 pip install -r requirements.txt
 ```
 
-### 2. Run the Streamlit app
+### 3. Download the spaCy language model (one-time)
+```powershell
+python -m spacy download en_core_web_sm
+```
+
+> Or run the all-in-one setup script:
+> ```powershell
+> python setup_nlp.py
+> ```
+
+### 4. Configure API key
+Copy `.env.example` to `.env` and add your Groq key (free):
+```
+GROQ_API_KEY=gsk_your_key_here
+```
+Get a free key at: https://console.groq.com
+
+### 5. Run the app
 ```powershell
 streamlit run app.py
 ```
 
-### 3. Use the app
-1. Upload your PDF/DOCX/PPTX/TXT notes in the left panel
-2. Click **Index Documents**
-3. Type your question or pick a study mode
-4. Click **Ask Assistant**
+---
+
+## Using Handwritten Notes
+
+1. Take a **photo or scan** of your handwritten notes (PNG / JPG)
+2. Upload via the **Upload Study Material** panel
+3. Click **Index Documents** — the system will:
+   - Run **EasyOCR** to extract text (offline, no API needed)
+   - Apply **NLP cleaning**: noise removal → spell-correction → sentence segmentation
+   - Extract **keywords** via spaCy for better search
+   - Store **OCR confidence** per page
+4. Ask questions — answers are automatically verified against your notes
 
 ---
 
 ## System Architecture
 
 ```
-User Uploads Notes
+User Uploads Notes (PDF / DOCX / PPTX / TXT / PNG / JPG)
       ↓
 Document Loader (src/ingestion.py)
+  ├─ Text files → direct load + spaCy keyword extraction
+  ├─ PDFs → PyMuPDF; scanned pages → EasyOCR
+  └─ Images → EasyOCR (handwritten support)
       ↓
-Text Chunking (500 tokens, 50 overlap)
+NLP Post-Processing (src/nlp_processor.py)
+  ├─ Noise removal (garbage chars, broken Unicode)
+  ├─ Line de-hyphenation
+  ├─ Spell correction (SymSpell — offline dictionary)
+  ├─ Sentence segmentation (spaCy)
+  └─ Keyword / entity extraction → chunk enrichment
+      ↓
+Text Chunking (500 chars, 50 overlap)
+  + OCR confidence & keywords stored in chunk metadata
       ↓
 Embedding Generation (all-MiniLM-L6-v2)
       ↓
-FAISS Vector Database  +  BM25 Index
+FAISS Vector Database  +  BM25 Index (keyword-enriched)
       ↓
 Adaptive Decision Layer (src/adaptive_selector.py)
       ↓
 Hybrid Retrieval + Re-ranking (src/retriever.py)
       ↓
-LLM Response Generation (Groq / OpenAI / Local)
+LLM Response Generation (Groq / OpenAI / Local flan-t5)
+      ↓
+🛡️ Hallucination Guard (src/hallucination_guard.py)
+  ├─ Sentence-level token-F1 grounding check
+  ├─ Strips / flags unverified claims
+  ├─ OCR quality warning if source confidence is low
+  └─ Verdict: PASS / PARTIAL / FAIL
       ↓
 Feedback & Metrics Tracking (src/feedback.py)
 ```
@@ -98,16 +165,48 @@ if avg_recent_latency > 8.0 seconds:
 
 ---
 
-## API Key
+## Hallucination Guard
 
-The `.env` file is pre-configured with a Groq API key (Llama 3, free tier).
+Every generated answer is post-processed through `src/hallucination_guard.py`:
 
-To use your own key, edit `.env`:
+1. **Sentence splitting** — answer is broken into individual claims
+2. **Token F1 grounding** — each sentence compared to the retrieved context corpus
+3. **Verdict assignment:**
+   - `✅ PASS` — ≥50% of sentences grounded in your notes
+   - `⚠️ PARTIAL` — 25–50% grounded; unverified claims removed with a caveat
+   - `🚫 FAIL` — <25% grounded; replaced with "not found in notes" message
+4. **OCR warning** — if source pages had low OCR confidence, a reminder is appended
+
+---
+
+## Folder Structure
+
 ```
-GROQ_API_KEY=gsk_your_key_here
+college-notes-rag/
+├── app.py                         # Streamlit UI
+├── requirements.txt
+├── setup_nlp.py                   # One-shot NLP setup & self-test script
+├── .env.example                   # API key template
+├── .env                           # API keys (not committed)
+├── src/
+│   ├── ingestion.py               # Document loading, OCR, NLP enrichment
+│   ├── nlp_processor.py           # ✨ NEW: NLP post-processing pipeline
+│   ├── hallucination_guard.py     # ✨ NEW: Answer grounding & verification
+│   ├── vector_store.py            # FAISS index
+│   ├── keyword_store.py           # BM25 index
+│   ├── retriever.py               # Hybrid retrieval + re-ranking
+│   ├── adaptive_selector.py       # Adaptive decision layer
+│   ├── generator.py               # LLM generation (Groq/OpenAI/Local)
+│   ├── feedback.py                # Metrics & feedback loop
+│   ├── cache.py                   # Query cache
+│   └── pipeline.py                # Main orchestrator
+├── sample_notes/                  # Demo study material
+│   ├── operating_systems.txt
+│   ├── dbms.txt
+│   └── computer_networks.txt
+├── venv/                          # Local virtual environment (not committed)
+└── embeddings/                    # Auto-created FAISS index (not committed)
 ```
-
-Get a free key at: https://console.groq.com
 
 ---
 
@@ -118,31 +217,6 @@ The system tracks per-query:
 - P50 / P95 latency
 - Strategy distribution (vector/hybrid/keyword)
 - Cache hit rate
+- Grounding confidence score per answer
 
 View stats in the sidebar after running queries.
-
----
-
-## Folder Structure
-
-```
-college-notes-rag/
-├── app.py                    # Streamlit UI
-├── requirements.txt
-├── .env                      # API keys (pre-filled)
-├── src/
-│   ├── ingestion.py          # Document loading & chunking
-│   ├── vector_store.py       # FAISS index
-│   ├── keyword_store.py      # BM25 index
-│   ├── retriever.py          # Hybrid retrieval + re-ranking
-│   ├── adaptive_selector.py  # Adaptive decision layer
-│   ├── generator.py          # LLM generation (Groq/OpenAI/Local)
-│   ├── feedback.py           # Metrics & feedback loop
-│   ├── cache.py              # Query cache
-│   └── pipeline.py           # Main orchestrator
-├── sample_notes/             # Demo study material
-│   ├── operating_systems.txt
-│   ├── dbms.txt
-│   └── computer_networks.txt
-└── embeddings/               # Auto-created FAISS index
-```

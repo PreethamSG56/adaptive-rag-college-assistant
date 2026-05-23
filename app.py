@@ -372,6 +372,7 @@ with left_col:
     st.markdown("""
     <div class="upload-info">
         Supported: <b>PDF, DOCX, PPTX, TXT, PNG, JPG</b><br>
+        <span style="color:#c084fc;">✍️ Handwritten notes</span> are auto-processed with OCR + NLP<br>
         Drag & drop or click to browse
     </div>
     """, unsafe_allow_html=True)
@@ -518,6 +519,40 @@ with right_col:
                 {res['answer'].replace(chr(10), '<br>')}
             </div>
             """, unsafe_allow_html=True)
+
+            # ── Hallucination Guard Verdict ──
+            grounding = res.get("grounding", {})
+            if grounding:
+                verdict = grounding.get("verdict", "")
+                conf = grounding.get("confidence", 0)
+                grounded_ratio = grounding.get("grounded_ratio", 0)
+                ocr_warn = grounding.get("ocr_warning", False)
+                ungrounded = grounding.get("ungrounded_count", 0)
+
+                verdict_badge_map = {
+                    "PASS": "badge-green",
+                    "PARTIAL": "badge-yellow",
+                    "FAIL": "badge-red",
+                }
+                verdict_icon_map = {
+                    "PASS": "✅",
+                    "PARTIAL": "⚠️",
+                    "FAIL": "🚫",
+                }
+                vbadge = verdict_badge_map.get(verdict, "badge-blue")
+                vicon = verdict_icon_map.get(verdict, "ℹ️")
+
+                guard_html = (
+                    f'<span class="badge {vbadge}">{vicon} Grounding: {verdict}</span> '
+                    f'<span class="badge badge-blue">🎯 Confidence: {int(conf*100)}%</span> '
+                    f'<span class="badge badge-purple">📊 Grounded: {int(grounded_ratio*100)}%</span>'
+                )
+                if ocr_warn:
+                    guard_html += ' <span class="badge badge-yellow">📷 Low OCR Quality</span>'
+                if ungrounded > 0:
+                    guard_html += f' <span class="badge badge-red">🚫 {ungrounded} claim(s) removed</span>'
+
+                st.markdown(f"<div style='margin:0.4rem 0;'>{guard_html}</div>", unsafe_allow_html=True)
 
             # Sources
             if res["sources"]:

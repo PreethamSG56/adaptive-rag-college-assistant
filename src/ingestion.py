@@ -1,8 +1,13 @@
 """
 Document Loader and Chunker
 ============================
-Supports: PDF, DOCX, PPTX, TXT files.
+Supports: PDF, DOCX, PPTX, TXT, PNG, JPG files.
 Chunks text with configurable size and overlap.
+
+NLP Pipeline (for handwritten / scanned notes):
+  OCR (EasyOCR)  →  Noise removal  →  Spell-correction (SymSpell)
+  →  Sentence segmentation (spaCy)  →  Keyword extraction
+  →  Confidence scoring  →  Chunk enrichment
 """
 
 from __future__ import annotations
@@ -15,8 +20,16 @@ from pathlib import Path
 from typing import List, Optional
 
 
-def _transcribe_image_local(image_bytes: bytes) -> str:
-    """Uses offline EasyOCR (CNN/RNN based) to read handwritten or scanned text."""
+def _transcribe_image_local(image_bytes: bytes, run_nlp: bool = True) -> tuple:
+    """
+    Uses offline EasyOCR (CNN/RNN) to read handwritten or scanned text,
+    then applies NLP post-processing to clean and enrich the result.
+
+    Returns
+    -------
+    tuple (cleaned_text: str, ocr_confidence: float, keywords: list[str])
+    """
+    raw_text = ""
     try:
         import easyocr
         import warnings
@@ -24,13 +37,39 @@ def _transcribe_image_local(image_bytes: bytes) -> str:
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
             reader = easyocr.Reader(['en'], gpu=False, verbose=False)
-        
+
         print("[OCR] Running EasyOCR on image... this might take a moment.")
         results = reader.readtext(image_bytes, detail=0)
-        return " ".join(results).strip()
+        raw_text = " ".join(results).strip()
+        print(f"[OCR] Raw text extracted: {len(raw_text)} chars")
     except Exception as e:
         print(f"[OCR] EasyOCR error: {e}")
-        return ""
+        return "", 0.0, []
+
+    if not raw_text:
+        return "", 0.0, []
+
+    # ── NLP post-processing ──
+    if run_nlp:
+        try:
+            from src.nlp_processor import process_ocr_text
+            nlp_result = process_ocr_text(
+                raw_text,
+                run_spell_correction=True,
+                run_spacy=True,
+                is_handwritten=True,
+            )
+            print(
+                f"[NLP] OCR confidence: {nlp_result.ocr_confidence:.2f} | "
+                f"spell_corrected={nlp_result.spell_corrected} | "
+                f"spacy={nlp_result.spacy_enriched} | "
+                f"keywords={len(nlp_result.keywords)}"
+            )
+            return nlp_result.cleaned_text, nlp_result.ocr_confidence, nlp_result.keywords
+        except Exception as e:
+            print(f"[NLP] Post-processing error: {e} — using raw OCR text")
+
+    return raw_text, 0.5, []
 
 
 @dataclass
@@ -48,9 +87,18 @@ def _load_txt(path: Path) -> str:
         return f.read()
 
 
-def _load_pdf(path: Path) -> str:
-    """Extract text from PDF using PyMuPDF. Scanned pages are automatically OCR'd via EasyOCR."""
-    full_text = ""
+def _load_pdf(path: Path) -> tuple:
+    """
+    Extract text from PDF using PyMuPDF.
+    Scanned/handwritten pages are automatically OCR'd via EasyOCR + NLP pipeline.
+
+    Returns
+    -------
+    tuple (text: str, page_meta: list[dict])
+        page_meta contains per-page ocr_confidence and keywords.
+    """
+    page_meta: list[dict] = []
+
     # Try PyMuPDF (fitz) first
     try:
         import fitz
@@ -58,32 +106,42 @@ def _load_pdf(path: Path) -> str:
         pages = []
         for i, page in enumerate(doc):
             text = page.get_text("text").strip()
-            
-            # If the page has little extractable text, it's likely a scanned handwritten page
+            page_ocr_conf = 1.0
+            page_keywords: list = []
+
+            # If the page has little extractable text, it's likely scanned/handwritten
             if len(text) < 150:
-                print(f"[Loader] Page {i+1} appears to be scanned. Running OCR...")
-                pix = page.get_pixmap(matrix=fitz.Matrix(2, 2)) # 2x zoom for better OCR
+                print(f"[Loader] Page {i+1} appears to be scanned/handwritten. Running OCR + NLP...")
+                pix = page.get_pixmap(matrix=fitz.Matrix(2, 2))  # 2x zoom for better OCR
                 img_bytes = pix.tobytes("png")
-                ocr_text = _transcribe_image_local(img_bytes)
+                ocr_text, conf, kws = _transcribe_image_local(img_bytes)
                 if ocr_text:
                     text = ocr_text
-                    
+                    page_ocr_conf = conf
+                    page_keywords = kws
+
             if text:
                 pages.append(text)
+                page_meta.append({
+                    "page": i + 1,
+                    "ocr_confidence": page_ocr_conf,
+                    "keywords": page_keywords,
+                })
+
         full_text = "\n\n".join(pages)
         print(f"[Loader] PDF loaded via PyMuPDF: {len(full_text)} chars from {len(pages)} pages")
-        return full_text
+        return full_text, page_meta
     except Exception as e:
         print(f"[Loader] PyMuPDF error {path.name}: {e}")
 
-    # Fallback to pdfplumber
+    # Fallback to pdfplumber (no OCR meta)
     try:
         import pdfplumber
         with pdfplumber.open(path) as pdf:
             pages = [page.extract_text() or "" for page in pdf.pages]
         full_text = "\n\n".join(pages)
         print(f"[Loader] PDF loaded via pdfplumber fallback: {len(full_text)} chars")
-        return full_text
+        return full_text, []
     except Exception as e:
         print(f"[Loader] pdfplumber error {path.name}: {e}")
 
@@ -94,10 +152,10 @@ def _load_pdf(path: Path) -> str:
         pages = [page.extract_text() or "" for page in reader.pages]
         full_text = "\n\n".join(pages)
         print(f"[Loader] PDF loaded via pypdf fallback: {len(full_text)} chars")
-        return full_text
+        return full_text, []
     except Exception as e:
         print(f"[Loader] pypdf error {path.name}: {e}")
-        return ""
+        return "", []
 
 
 def _load_docx(path: Path) -> str:
@@ -131,33 +189,65 @@ def _load_pptx(path: Path) -> str:
         return ""
 
 
-def _load_image(path: Path) -> str:
-    """Extract handwritten or printed text from an image using offline EasyOCR."""
+def _load_image(path: Path) -> tuple:
+    """
+    Extract handwritten or printed text from an image using offline EasyOCR + NLP.
+
+    Returns
+    -------
+    tuple (text: str, ocr_confidence: float, keywords: list[str])
+    """
     try:
         with open(path, "rb") as f:
             img_bytes = f.read()
-        print(f"[Loader] Running OCR on image {path.name}...")
+        print(f"[Loader] Running OCR + NLP on image {path.name}...")
         return _transcribe_image_local(img_bytes)
     except Exception as e:
         print(f"[Loader] Image OCR error {path.name}: {e}")
-        return ""
+        return "", 0.0, []
 
 
-def load_file(path: Path) -> str:
-    """Dispatch to the correct loader based on file extension."""
+def load_file(path: Path) -> tuple:
+    """
+    Dispatch to the correct loader based on file extension.
+
+    Returns
+    -------
+    tuple (text: str, ocr_confidence: float, keywords: list[str], page_meta: list[dict])
+    """
     ext = path.suffix.lower()
     if ext in (".txt", ".md"):
-        return _load_txt(path)
+        # Plain text — apply lightweight NLP for keyword extraction
+        raw = _load_txt(path)
+        keywords: list = []
+        try:
+            from src.nlp_processor import _extract_entities_and_keywords
+            keywords = _extract_entities_and_keywords(raw)
+        except Exception:
+            pass
+        return raw, 1.0, keywords, []
     elif ext == ".pdf":
-        return _load_pdf(path)
+        text, page_meta = _load_pdf(path)
+        # Aggregate keywords from all pages
+        all_kws: list = []
+        for pm in page_meta:
+            all_kws.extend(pm.get("keywords", []))
+        avg_conf = (
+            sum(pm.get("ocr_confidence", 1.0) for pm in page_meta) / len(page_meta)
+            if page_meta else 1.0
+        )
+        return text, avg_conf, list(dict.fromkeys(all_kws)), page_meta
     elif ext == ".docx":
-        return _load_docx(path)
+        raw = _load_docx(path)
+        return raw, 1.0, [], []
     elif ext in (".pptx", ".ppt"):
-        return _load_pptx(path)
+        raw = _load_pptx(path)
+        return raw, 1.0, [], []
     elif ext in (".png", ".jpg", ".jpeg"):
-        return _load_image(path)
+        text, conf, kws = _load_image(path)
+        return text, conf, kws, []
     else:
-        return ""
+        return "", 1.0, [], []
 
 
 def chunk_text(
@@ -239,21 +329,35 @@ def ingest_documents(
 
     for file_path in files:
         print(f"[Loader] Loading: {file_path.name}")
-        raw_text = load_file(file_path)
-        if not raw_text.strip():
+        text, ocr_confidence, keywords, page_meta = load_file(file_path)
+        if not text.strip():
             print(f"[Loader] Empty or unreadable: {file_path.name}")
             continue
-        chunks = chunk_text(raw_text, chunk_size, overlap)
+
+        # Keyword enrichment for BM25 searchability
+        try:
+            from src.nlp_processor import enrich_chunk_with_keywords
+            enrich = True
+        except Exception:
+            enrich = False
+
+        chunks = chunk_text(text, chunk_size, overlap)
         for i, chunk in enumerate(chunks):
+            enriched_chunk = enrich_chunk_with_keywords(chunk, keywords) if enrich else chunk
             documents.append(
                 Document(
-                    text=chunk,
+                    text=enriched_chunk,
                     source=file_path.name,
                     chunk_id=i,
-                    metadata={"file": str(file_path)},
+                    metadata={
+                        "file": str(file_path),
+                        "ocr_confidence": ocr_confidence,
+                        "keywords": ",".join(keywords[:10]),
+                        "is_handwritten": ocr_confidence < 0.95,
+                    },
                 )
             )
-        print(f"[Loader] {file_path.name} -> {len(chunks)} chunks")
+        print(f"[Loader] {file_path.name} -> {len(chunks)} chunks (OCR conf: {ocr_confidence:.2f})")
 
     print(f"[Loader] Total documents: {len(documents)}")
     return documents
