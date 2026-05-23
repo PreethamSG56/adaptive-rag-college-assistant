@@ -5,6 +5,7 @@ embeddings/
 feedback_log.jsonl
 *.pkl
 *.index
+.ingest_cache.pkl
 
 # Virtual environment
 venv/

@@ -18,7 +18,9 @@ NLP Pipeline (for handwritten / scanned notes):
 
 from __future__ import annotations
 
+import hashlib
 import os
+import pickle
 import re
 import warnings
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -330,6 +332,28 @@ def _load_image(path: Path) -> tuple:
         return "", 0.0, []
 
 
+# ── Fast regex keyword extractor (no spaCy load needed) ─────────────────────
+_CAPITAL_WORD = re.compile(r"\b[A-Z][a-z]{2,}(?:\s+[A-Z][a-z]{2,}){0,2}\b")
+_TECH_TERM    = re.compile(r"\b[A-Za-z][a-z]*(?:[A-Z][a-z]+)+\b")   # camelCase
+
+def _fast_keywords(text: str, max_kw: int = 20) -> list:
+    """
+    Extract keywords using regex only — no spaCy import needed.
+    ~100x faster than spaCy for large files.
+    """
+    caps   = _CAPITAL_WORD.findall(text[:8000])
+    camel  = _TECH_TERM.findall(text[:8000])
+    seen, result = set(), []
+    for kw in caps + camel:
+        kl = kw.lower()
+        if kl not in seen and len(kw) > 3:
+            seen.add(kl)
+            result.append(kw)
+        if len(result) >= max_kw:
+            break
+    return result
+
+
 def load_file(path: Path) -> tuple:
     """
     Dispatch to the correct loader based on file extension.
@@ -340,18 +364,11 @@ def load_file(path: Path) -> tuple:
     """
     ext = path.suffix.lower()
     if ext in (".txt", ".md"):
-        # Plain text — apply lightweight NLP for keyword extraction
         raw = _load_txt(path)
-        keywords: list = []
-        try:
-            from src.nlp_processor import _extract_entities_and_keywords
-            keywords = _extract_entities_and_keywords(raw)
-        except Exception:
-            pass
-        return raw, 1.0, keywords, []
+        # Fast regex keywords — avoids slow spaCy startup
+        return raw, 1.0, _fast_keywords(raw), []
     elif ext == ".pdf":
         text, page_meta = _load_pdf(path)
-        # Aggregate keywords from all pages
         all_kws: list = []
         for pm in page_meta:
             all_kws.extend(pm.get("keywords", []))
@@ -362,10 +379,10 @@ def load_file(path: Path) -> tuple:
         return text, avg_conf, list(dict.fromkeys(all_kws)), page_meta
     elif ext == ".docx":
         raw = _load_docx(path)
-        return raw, 1.0, [], []
+        return raw, 1.0, _fast_keywords(raw), []
     elif ext in (".pptx", ".ppt"):
         raw = _load_pptx(path)
-        return raw, 1.0, [], []
+        return raw, 1.0, _fast_keywords(raw), []
     elif ext in (".png", ".jpg", ".jpeg"):
         text, conf, kws = _load_image(path)
         return text, conf, kws, []
@@ -421,17 +438,69 @@ def chunk_text(
     return chunks
 
 
+# ── File hash cache (skip unchanged files on re-index) ──────────────────────
+import hashlib
+
+def _file_hash(path: Path) -> str:
+    """Fast MD5 of file content — used to detect unchanged files."""
+    h = hashlib.md5()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(65536), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _process_single_file(
+    file_path: Path,
+    chunk_size: int,
+    overlap: int,
+) -> List[Document]:
+    """Load + chunk one file. Used as the parallel worker."""
+    print(f"[Loader] ▶ {file_path.name}")
+    text, ocr_confidence, keywords, _ = load_file(file_path)
+    if not text.strip():
+        print(f"[Loader] ✗ Empty: {file_path.name}")
+        return []
+
+    # Append keyword footer once (fast, no spaCy)
+    kw_footer = f"\n[KEY_CONCEPTS: {', '.join(keywords[:15])}]" if keywords else ""
+
+    chunks = chunk_text(text, chunk_size, overlap)
+    docs = []
+    for i, chunk in enumerate(chunks):
+        docs.append(Document(
+            text=chunk + (kw_footer if i == 0 else ""),  # footer only on first chunk
+            source=file_path.name,
+            chunk_id=i,
+            metadata={
+                "file": str(file_path),
+                "ocr_confidence": ocr_confidence,
+                "keywords": ",".join(keywords[:10]),
+                "is_handwritten": ocr_confidence < 0.95,
+            },
+        ))
+    print(f"[Loader] ✓ {file_path.name} → {len(chunks)} chunks (conf={ocr_confidence:.2f})")
+    return docs
+
+
 def ingest_documents(
     source: str,
     chunk_size: int = 500,
     overlap: int = 50,
+    max_workers: int = 4,
+    cache_file: Optional[str] = None,
 ) -> List[Document]:
     """
     Load all supported files from a file path or directory.
+
+    Speed features:
+    - Parallel file processing (ThreadPoolExecutor, default 4 workers)
+    - Hash-based cache: unchanged files are skipped entirely
+    - Fast regex keyword extraction (no spaCy startup cost)
+
     Returns a flat list of Document objects.
     """
     source_path = Path(source)
-    documents: List[Document] = []
 
     if source_path.is_dir():
         files = (
@@ -450,37 +519,72 @@ def ingest_documents(
         print(f"[Loader] Path not found: {source}")
         return []
 
-    for file_path in files:
-        print(f"[Loader] Loading: {file_path.name}")
-        text, ocr_confidence, keywords, page_meta = load_file(file_path)
-        if not text.strip():
-            print(f"[Loader] Empty or unreadable: {file_path.name}")
-            continue
+    if not files:
+        return []
 
-        # Keyword enrichment for BM25 searchability
+    # ── Hash-based incremental cache ─────────────────────────────────────────
+    cache_path = Path(cache_file) if cache_file else source_path.parent / ".ingest_cache.pkl"
+    hash_cache: dict = {}
+    if cache_path.exists():
         try:
-            from src.nlp_processor import enrich_chunk_with_keywords
-            enrich = True
+            with open(cache_path, "rb") as f:
+                hash_cache = pickle.load(f)
         except Exception:
-            enrich = False
+            hash_cache = {}
 
-        chunks = chunk_text(text, chunk_size, overlap)
-        for i, chunk in enumerate(chunks):
-            enriched_chunk = enrich_chunk_with_keywords(chunk, keywords) if enrich else chunk
-            documents.append(
-                Document(
-                    text=enriched_chunk,
-                    source=file_path.name,
-                    chunk_id=i,
-                    metadata={
-                        "file": str(file_path),
-                        "ocr_confidence": ocr_confidence,
-                        "keywords": ",".join(keywords[:10]),
-                        "is_handwritten": ocr_confidence < 0.95,
-                    },
-                )
-            )
-        print(f"[Loader] {file_path.name} -> {len(chunks)} chunks (OCR conf: {ocr_confidence:.2f})")
+    import pickle as _pkl
 
-    print(f"[Loader] Total documents: {len(documents)}")
-    return documents
+    new_hashes: dict = {}
+    files_to_process: List[Path] = []
+    cached_docs: List[Document] = []
+
+    for fp in files:
+        fh = _file_hash(fp)
+        new_hashes[str(fp)] = fh
+        if hash_cache.get(str(fp)) == fh and str(fp) in hash_cache.get("_docs", {}):
+            # File unchanged — reuse cached documents
+            cached_docs.extend(hash_cache["_docs"][str(fp)])
+            print(f"[Loader] ⚡ Cached (unchanged): {fp.name}")
+        else:
+            files_to_process.append(fp)
+
+    # ── Parallel processing of new/changed files ──────────────────────────────
+    fresh_docs: List[Document] = []
+    if files_to_process:
+        workers = min(max_workers, len(files_to_process))
+        print(f"[Loader] Processing {len(files_to_process)} file(s) with {workers} worker(s)...")
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            futures = {
+                pool.submit(_process_single_file, fp, chunk_size, overlap): fp
+                for fp in files_to_process
+            }
+            for future in as_completed(futures):
+                try:
+                    result = future.result()
+                    fresh_docs.extend(result)
+                    # Cache this file's docs
+                    fp = futures[future]
+                    if "_docs" not in new_hashes:
+                        new_hashes["_docs"] = {}
+                    new_hashes["_docs"][str(fp)] = result
+                except Exception as e:
+                    print(f"[Loader] Error processing {futures[future].name}: {e}")
+
+    # ── Save updated hash cache ───────────────────────────────────────────────
+    if files_to_process:
+        # Merge old cached docs into new_hashes
+        if "_docs" not in new_hashes:
+            new_hashes["_docs"] = {}
+        for fp_str, docs in hash_cache.get("_docs", {}).items():
+            if fp_str not in new_hashes["_docs"]:
+                new_hashes["_docs"][fp_str] = docs
+        try:
+            with open(cache_path, "wb") as f:
+                _pkl.dump(new_hashes, f)
+        except Exception as e:
+            print(f"[Loader] Cache save failed: {e}")
+
+    all_docs = cached_docs + fresh_docs
+    print(f"[Loader] Total: {len(all_docs)} chunks "
+          f"({len(cached_docs)} from cache, {len(fresh_docs)} fresh)")
+    return all_docs
