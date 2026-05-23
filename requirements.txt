@@ -4,6 +4,7 @@ uvicorn>=0.30.0
 python-multipart>=0.0.9
 sentence-transformers>=2.7.0
 faiss-cpu>=1.8.0
+fastembed>=0.3.0               # Fast embedding model used by VectorStore (BAAI/bge-small-en-v1.5)
 rank-bm25>=0.2.2
 transformers>=4.40.0
 torch>=2.2.0
